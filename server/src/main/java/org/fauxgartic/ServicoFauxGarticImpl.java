@@ -1,7 +1,7 @@
 package org.fauxgartic;
 
 import io.grpc.stub.StreamObserver;
-import org.fauxgartic.grpc.*; // Importa as classes geradas
+import org.fauxgartic.grpc.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -9,159 +9,186 @@ public class ServicoFauxGarticImpl extends FauxGarticServiceGrpc.FauxGarticServi
 
     // --- Estado do Jogo ---
     private final List<String> bancoDePalavras = Arrays.asList(
-            "Gato", "Cachorro", "Elefante", "Leão", "Boi", "Cama", "Caneta", "Casa", "Banco", "Peixe"
+            "Gato", "Cachorro", "Elefante", "Leão", "Boi", "Cama", "Caneta", "Casa", "Banco", "Peixe",
+            "Avião", "Carro", "Computador", "Banana", "Abacaxi", "Sol", "Lua", "Estrela"
     );
     private String palavraAtual = "";
     private String idDesenhistaAtual = "";
 
-    // Lista de Jogadores (ID -> Nome)
-    private Map<String, String> jogadores = new ConcurrentHashMap<>();
+    // Mapeamentos
+    private Map<String, String> mapNomes = new ConcurrentHashMap<>();
+    private Map<String, StreamObserver<EventoDeJogo>> mapObservadores = new ConcurrentHashMap<>();
 
-    // Canais de comunicação com os clientes (ID -> StreamObserver)
-    private Map<String, StreamObserver<EventoDeJogo>> observadoresClientes = new ConcurrentHashMap<>();
+    // MUDANÇA: Lista para garantir a ordem da fila (Circular)
+    private final List<String> filaJogadores = new ArrayList<>();
 
     public ServicoFauxGarticImpl() {
-        // Inicia o jogo sem ninguém
         sortearNovaPalavra();
     }
 
-    /**
-     * Cliente chama isso ao abrir o jogo para se registrar.
-     */
     @Override
     public void entrarNoJogo(Jogador request, StreamObserver<EstadoDoJogo> responseObserver) {
-        String idJogador = UUID.randomUUID().toString();
+        String idJogador = request.getId().isEmpty() ? request.getNome() : request.getId(); // Fallback simples
         String nome = request.getNome();
 
-        jogadores.put(idJogador, nome);
-        System.out.println("Novo jogador entrou: " + nome + " (ID: " + idJogador + ")");
+        // Registra jogador
+        mapNomes.put(idJogador, nome);
 
-        // Se for o primeiro jogador, ele vira o desenhista
-        if (jogadores.size() == 1) {
+        // Adiciona na fila de forma thread-safe
+        synchronized (filaJogadores) {
+            if (!filaJogadores.contains(idJogador)) {
+                filaJogadores.add(idJogador);
+                System.out.println("Adicionado à fila: " + nome + ". Total: " + filaJogadores.size());
+            }
+        }
+
+        // Se for o primeiro, já assume como desenhista
+        if (filaJogadores.size() == 1) {
             idDesenhistaAtual = idJogador;
-            System.out.println("Ele é o primeiro, então será o Desenhista.");
         }
 
         boolean souDesenhista = idJogador.equals(idDesenhistaAtual);
 
-        // Retorna o estado inicial para o cliente
         EstadoDoJogo estado = EstadoDoJogo.newBuilder()
                 .setSouODesenhista(souDesenhista)
-                .setDesenhistaAtual(jogadores.getOrDefault(idDesenhistaAtual, "Ninguém"))
-                .setPalavraAtual(souDesenhista ? palavraAtual : "") // Só manda a palavra se for o desenhista
+                .setDesenhistaAtual(mapNomes.getOrDefault(idDesenhistaAtual, "Carregando..."))
+                .setPalavraAtual(souDesenhista ? palavraAtual : "")
                 .build();
 
         responseObserver.onNext(estado);
         responseObserver.onCompleted();
 
-        // Avisa os outros que alguém entrou
-        transmitirMensagemChat("Servidor: " + nome + " entrou na sala!");
+        transmitirMensagemChat("SERVER", nome + " entrou na sala!");
     }
 
-    /**
-     * Cliente chama isso para começar a ESCUTAR eventos.
-     */
     @Override
     public void receberEventos(Jogador request, StreamObserver<EventoDeJogo> responseObserver) {
-        observadoresClientes.put(request.getId(), responseObserver);
+        String id = request.getId().isEmpty() ? request.getNome() : request.getId();
+        mapObservadores.put(id, responseObserver);
+        System.out.println("Stream conectado: " + id);
     }
 
-    /**
-     * Cliente manda uma ação (Desenho ou Palpite).
-     */
     @Override
     public void enviarAcao(AcaoJogador request, StreamObserver<Vazio> responseObserver) {
         String idJogador = request.getJogador().getId();
-        String nomeJogador = jogadores.get(idJogador);
+        String nomeJogador = mapNomes.getOrDefault(idJogador, request.getJogador().getNome());
 
-        // --- Se for um TRAÇO (Desenho) ---
+        // 1. DESENHO
         if (request.hasTraco()) {
-            if (idJogador.equals(idDesenhistaAtual)) {
-                EventoDeJogo evento = EventoDeJogo.newBuilder()
-                        .setDesenho(request.getTraco())
-                        .build();
-                transmitirEvento(evento);
-            }
+            EventoDeJogo evento = EventoDeJogo.newBuilder().setDesenho(request.getTraco()).build();
+            transmitirEvento(evento);
         }
 
-        // --- Se for um PALPITE (Chat) ---
+        // 2. PALPITE / CHAT
         else if (request.hasPalpite()) {
-            String palpite = request.getPalpite();
-            System.out.println("Palpite de " + nomeJogador + ": " + palpite);
+            String texto = request.getPalpite();
 
-            if (palpite.equalsIgnoreCase(palavraAtual)) {
-                // ACERTOU!
-                transmitirMensagemChat("**********************************");
-                transmitirMensagemChat(nomeJogador + " ACERTOU A PALAVRA!");
-                transmitirMensagemChat("A palavra era: " + palavraAtual);
-                transmitirMensagemChat("**********************************");
-
+            // Verifica vitória (Case insensitive)
+            if (idJogador.equals(idDesenhistaAtual)) {
+                // Desenhista não pode adivinhar, mas pode falar coisas que não sejam a palavra
+                transmitirMensagemChat(nomeJogador, texto);
+            }
+            else if (texto.equalsIgnoreCase(palavraAtual)) {
+                transmitirMensagemChat("SERVER", ">>> " + nomeJogador + " ACERTOU! A palavra era: " + palavraAtual.toUpperCase());
                 iniciarNovaRodada();
             } else {
-                // ERROU
-                transmitirMensagemChat(nomeJogador + ": " + palpite);
+                transmitirMensagemChat(nomeJogador, texto);
             }
         }
 
-        // --- Se for LIMPAR TELA ---
+        // 3. LIMPAR TELA
         else if (request.getLimparTela()) {
-            if (idJogador.equals(idDesenhistaAtual)) {
-                EventoDeJogo evento = EventoDeJogo.newBuilder().setLimparTela(true).build();
-                transmitirEvento(evento);
-            }
+            EventoDeJogo evento = EventoDeJogo.newBuilder().setLimparTela(true).build();
+            transmitirEvento(evento);
         }
 
-        // Confirma recebimento
         responseObserver.onNext(Vazio.newBuilder().build());
         responseObserver.onCompleted();
     }
 
-    // --- Métodos Auxiliares ---
-
     private void iniciarNovaRodada() {
         sortearNovaPalavra();
 
-        List<String> ids = new ArrayList<>(jogadores.keySet());
-        if (!ids.isEmpty()) {
-            int indiceAtual = ids.indexOf(idDesenhistaAtual);
-            int proximoIndice = (indiceAtual + 1) % ids.size();
-            idDesenhistaAtual = ids.get(proximoIndice);
+        // MUDANÇA: Lógica de Fila Circular Robusta
+        synchronized (filaJogadores) {
+            if (filaJogadores.isEmpty()) return;
+
+            int indexAtual = filaJogadores.indexOf(idDesenhistaAtual);
+
+            // Se o desenhista atual saiu ou bugou, começa do zero, senão pega o próximo
+            if (indexAtual == -1) indexAtual = -1;
+
+            // Tenta achar o próximo jogador válido (loop para pular desconectados)
+            String novoDesenhistaId = null;
+            int tentativas = 0;
+            int proximoIndex = indexAtual;
+
+            while (tentativas < filaJogadores.size()) {
+                proximoIndex = (proximoIndex + 1) % filaJogadores.size();
+                String candidatoId = filaJogadores.get(proximoIndex);
+
+                // Verifica se o jogador ainda está no mapa de nomes/observadores (online)
+                if (mapObservadores.containsKey(candidatoId)) {
+                    novoDesenhistaId = candidatoId;
+                    break;
+                }
+                tentativas++;
+            }
+
+            if (novoDesenhistaId != null) {
+                idDesenhistaAtual = novoDesenhistaId;
+            } else {
+                // Se ninguém estiver online, mantém ou reseta
+                System.out.println("Nenhum jogador apto para a próxima rodada.");
+            }
         }
 
-        String nomeDesenhista = jogadores.get(idDesenhistaAtual);
-        System.out.println("Nova rodada! Desenhista: " + nomeDesenhista + " | Palavra: " + palavraAtual);
+        String nomeDesenhista = mapNomes.getOrDefault(idDesenhistaAtual, "Desconhecido");
 
         Rodada rodada = Rodada.newBuilder()
                 .setNomeDesenhista(nomeDesenhista)
                 .setPalavraSecreta(palavraAtual)
                 .build();
 
-        EventoDeJogo evento = EventoDeJogo.newBuilder()
-                .setMudancaRodada(rodada)
-                .build();
+        // 1. Avisa mudança de rodada
+        EventoDeJogo evtRodada = EventoDeJogo.newBuilder().setMudancaRodada(rodada).build();
+        transmitirEvento(evtRodada);
 
-        transmitirEvento(evento);
-        transmitirMensagemChat("--- NOVA RODADA! O desenhista é " + nomeDesenhista + " ---");
-        transmitirEvento(EventoDeJogo.newBuilder().setLimparTela(true).build());
+        // 2. Limpa a tela para o novo desenho
+        EventoDeJogo evtLimpar = EventoDeJogo.newBuilder().setLimparTela(true).build();
+        transmitirEvento(evtLimpar);
+
+        transmitirMensagemChat("SERVER", "--- VEZ DE: " + nomeDesenhista + " ---");
     }
 
     private void sortearNovaPalavra() {
         palavraAtual = bancoDePalavras.get(new Random().nextInt(bancoDePalavras.size()));
     }
 
-    private void transmitirMensagemChat(String msg) {
-        EventoDeJogo evento = EventoDeJogo.newBuilder()
-                .setMensagemChat(msg)
-                .build();
+    private void transmitirMensagemChat(String autor, String msg) {
+        String formatada = autor.equals("SERVER") ? msg : (autor + ": " + msg);
+        EventoDeJogo evento = EventoDeJogo.newBuilder().setMensagemChat(formatada).build();
         transmitirEvento(evento);
     }
 
     private void transmitirEvento(EventoDeJogo evento) {
-        for (StreamObserver<EventoDeJogo> observer : observadoresClientes.values()) {
-            try {
-                observer.onNext(evento);
-            } catch (Exception e) {
-                // Cliente desconectou
+        Set<String> keys = new HashSet<>(mapObservadores.keySet());
+
+        for (String id : keys) {
+            StreamObserver<EventoDeJogo> obs = mapObservadores.get(id);
+            if (obs == null) continue;
+
+            synchronized (obs) {
+                try {
+                    obs.onNext(evento);
+                } catch (Exception e) {
+                    System.out.println("Removendo cliente inativo: " + id);
+                    mapObservadores.remove(id);
+                    mapNomes.remove(id);
+                    synchronized (filaJogadores) {
+                        filaJogadores.remove(id);
+                    }
+                }
             }
         }
     }
