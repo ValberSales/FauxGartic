@@ -1,12 +1,12 @@
 package org.fauxgartic;
 
 import io.grpc.stub.StreamObserver;
-import org.fauxgartic.grpc.*; // Classes geradas pelo Protobuf
+import org.fauxgartic.grpc.*; // Importa as classes geradas
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
-// Renomeado para refletir o nome da aplicação "FauxGartic"
-public class ServicoFauxGarticImpl extends GarticServiceGrpc.GarticServiceImplBase {
+// CORREÇÃO AQUI: Mudamos de GarticServiceGrpc para FauxGarticServiceGrpc
+public class ServicoFauxGarticImpl extends FauxGarticServiceGrpc.FauxGarticServiceImplBase {
 
     // --- Estado do Jogo ---
     private final List<String> bancoDePalavras = Arrays.asList(
@@ -19,7 +19,6 @@ public class ServicoFauxGarticImpl extends GarticServiceGrpc.GarticServiceImplBa
     private Map<String, String> jogadores = new ConcurrentHashMap<>();
 
     // Canais de comunicação com os clientes (ID -> StreamObserver)
-    // É aqui que mandamos mensagens de volta para cada cliente (Broadcast)
     private Map<String, StreamObserver<EventoDeJogo>> observadoresClientes = new ConcurrentHashMap<>();
 
     public ServicoFauxGarticImpl() {
@@ -61,15 +60,10 @@ public class ServicoFauxGarticImpl extends GarticServiceGrpc.GarticServiceImplBa
     }
 
     /**
-     * Cliente chama isso para começar a ESCUTAR eventos (Chat, Desenhos, etc).
-     * Guardamos o 'responseObserver' dele para usar depois.
+     * Cliente chama isso para começar a ESCUTAR eventos.
      */
     @Override
     public void receberEventos(Jogador request, StreamObserver<EventoDeJogo> responseObserver) {
-        // O ID deve vir preenchido (o cliente gerou ou recebeu no EntrarNoJogo,
-        // mas para simplificar vamos assumir que o cliente manda o ID gerado localmente ou que geramos antes).
-        // Aqui, vamos assumir que o 'request.getId()' é a chave.
-
         observadoresClientes.put(request.getId(), responseObserver);
     }
 
@@ -83,9 +77,7 @@ public class ServicoFauxGarticImpl extends GarticServiceGrpc.GarticServiceImplBa
 
         // --- Se for um TRAÇO (Desenho) ---
         if (request.hasTraco()) {
-            // Verifica se quem mandou é realmente o desenhista
             if (idJogador.equals(idDesenhistaAtual)) {
-                // REPASSA o traço para todos os outros (Broadcast)
                 EventoDeJogo evento = EventoDeJogo.newBuilder()
                         .setDesenho(request.getTraco())
                         .build();
@@ -107,7 +99,7 @@ public class ServicoFauxGarticImpl extends GarticServiceGrpc.GarticServiceImplBa
 
                 iniciarNovaRodada();
             } else {
-                // ERROU (Manda como chat normal)
+                // ERROU
                 transmitirMensagemChat(nomeJogador + ": " + palpite);
             }
         }
@@ -120,18 +112,16 @@ public class ServicoFauxGarticImpl extends GarticServiceGrpc.GarticServiceImplBa
             }
         }
 
-        // Confirma recebimento (obrigatório no gRPC)
+        // Confirma recebimento
         responseObserver.onNext(Vazio.newBuilder().build());
         responseObserver.onCompleted();
     }
 
-    // --- Métodos Auxiliares (Lógica do Jogo) ---
+    // --- Métodos Auxiliares ---
 
     private void iniciarNovaRodada() {
-        // Sorteia nova palavra
         sortearNovaPalavra();
 
-        // Passa a vez para o próximo jogador (lógica simples de rotação)
         List<String> ids = new ArrayList<>(jogadores.keySet());
         if (!ids.isEmpty()) {
             int indiceAtual = ids.indexOf(idDesenhistaAtual);
@@ -142,10 +132,8 @@ public class ServicoFauxGarticImpl extends GarticServiceGrpc.GarticServiceImplBa
         String nomeDesenhista = jogadores.get(idDesenhistaAtual);
         System.out.println("Nova rodada! Desenhista: " + nomeDesenhista + " | Palavra: " + palavraAtual);
 
-        // Cria o evento de mudança de rodada
         Rodada rodada = Rodada.newBuilder()
                 .setNomeDesenhista(nomeDesenhista)
-                // O cliente vai verificar: se o nome for o dele, ele lê a palavra.
                 .setPalavraSecreta(palavraAtual)
                 .build();
 
@@ -155,8 +143,6 @@ public class ServicoFauxGarticImpl extends GarticServiceGrpc.GarticServiceImplBa
 
         transmitirEvento(evento);
         transmitirMensagemChat("--- NOVA RODADA! O desenhista é " + nomeDesenhista + " ---");
-
-        // Manda limpar a tela de todos
         transmitirEvento(EventoDeJogo.newBuilder().setLimparTela(true).build());
     }
 
@@ -172,13 +158,11 @@ public class ServicoFauxGarticImpl extends GarticServiceGrpc.GarticServiceImplBa
     }
 
     private void transmitirEvento(EventoDeJogo evento) {
-        // Itera sobre todos os clientes conectados e manda o evento
         for (StreamObserver<EventoDeJogo> observer : observadoresClientes.values()) {
             try {
                 observer.onNext(evento);
             } catch (Exception e) {
-                // Cliente desconectou ou erro de rede
-                // Num caso real, removeríamos da lista aqui
+                // Cliente desconectou
             }
         }
     }
