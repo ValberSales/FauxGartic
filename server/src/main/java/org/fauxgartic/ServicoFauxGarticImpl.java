@@ -5,7 +5,6 @@ import org.fauxgartic.grpc.*; // Importa as classes geradas
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
-// CORREÇÃO AQUI: Mudamos de GarticServiceGrpc para FauxGarticServiceGrpc
 public class ServicoFauxGarticImpl extends FauxGarticServiceGrpc.FauxGarticServiceImplBase {
 
     // --- Estado do Jogo ---
